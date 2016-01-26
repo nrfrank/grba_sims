@@ -10,7 +10,6 @@ of the blast wave, some root-finding methods, and definitions for calculating
 the fundamental physical properties and surface brightness profile of the burst.
 '''
 
-''' Import Statement Block'''
 #! /usr/bin/python
 
 # import most of what we'll need.
@@ -345,7 +344,7 @@ def thetaPrime(y, rPerp, thetaV, phi):
     rPerp [0-1]: The perpendicular distance from the LOS in scaled units of Rl.
         Through testing it should not generally be greater than 0.2.
     
-    thetaV [0-pi/4]: The viewing angle, in radians, between the LOS to observer
+    thetaV [0-~pi/4]: The viewing angle, in radians, between the LOS to observer
         and the jet emission axis.
     
     phi [0-pi]: Interior angle of spherical triangle. phi = 0 corresponds to the
@@ -356,6 +355,61 @@ def thetaPrime(y, rPerp, thetaV, phi):
 
     return(np.arccos(value))
 
+def gaussPL(y, rPerp, thetaV, phi, sig, kap):
+    '''
+    Define the gaussian power-law energy profile. This profile is defined by:
+            [2^(-x/sig)]^(2*kap),
+    where x will be thetaPrime. This profile is a basic gaussian raised to a 
+    power-law component (kap) and adjusted such that sig = FWHM.
+    
+    y [0-1]: The scaled variable in the radial direction. y := R/Rl.
+    
+    rPerp [0-1]: The perpendicular distance from the LOS in scaled units of Rl.
+        Through testing it should not generally be greater than 0.2.
+    
+    thetaV [0-~pi/4]: The viewing angle, in radians, between the LOS to observer
+        and the jet emission axis.
+    
+    phi [0-pi]: Interior angle of spherical triangle. phi = 0 corresponds to the
+        direction toward the main axis from the LOS.
+    
+    sig : The angular scale (width) of the profile. This value defines the FWHM.
+    
+    kap : Power-law index on the profile. kap = 0 defines a flat profile. kap < 1
+    defines a sharper profile (higher kurtosis). kap > 1 tends toward a Heaviside.
+    
+    '''
+    func = np.divide(np.power(thetaPrime(y, rPerp, thetaV, phi), 2.0*kap), np.power(sig, 2.0*kap))
+
+    return(np.exp2(-func))
+
+def coreJet(y, rPerp, thetaV, phi, sig):
+    '''
+    Define the core jet profile, which is essentially a Heaviside function, i.e.
+        this only returns a value (1.0) if the angle thetaPrime is greater than sig.
+    
+    y [0-1]: The scaled variable in the radial direction. y := R/Rl.
+    
+    rPerp [0-1]: The perpendicular distance from the LOS in scaled units of Rl.
+        Through testing it should not generally be greater than 0.2.
+    
+    thetaV [0-~pi/4]: The viewing angle, in radians, between the LOS to observer
+        and the jet emission axis.
+    
+    phi [0-pi]: Interior angle of spherical triangle. phi = 0 corresponds to the
+        direction toward the main axis from the LOS.
+    
+    sig : The angular scale (width) of the profile. This value defines the FWHM.
+
+    
+    '''
+    thP = thetaPrime(y, rPerp, thetaV, phi)
+    if thP > sig:
+        val = 0.0
+    else:
+        val = 1.0
+    return(val)
+    
 if __name__ == '__main__':
     import sys
     view = sys.argv[1]
@@ -366,8 +420,8 @@ if __name__ == '__main__':
     t0 = 1.0
     gamma0 = 50.0
     thetaV = radians(6.0)
-    sig = radians(2.0)
-    kap = 10.0
+    sig = radians(6.0)
+    kap = 3.0
     dist = 0.2
     offset = 0.01
     n_grid = 100
@@ -385,7 +439,7 @@ if __name__ == '__main__':
                 phi = angle(offset, 0.0, offset - X[i][j], Y[i][j])
                 rPerp = np.sqrt(np.power(X[i][j] - offset,2.0) + np.power(Y[i][j], 2.0))
                 
-                array[i][j] = degrees(thetaPrime(1.0, rPerp, thetaV, phi))
+                array[i][j] = coreJet(1.0, rPerp, thetaV, phi, sig)
 
         
     elif view == 'top':
