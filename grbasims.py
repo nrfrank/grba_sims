@@ -1,6 +1,6 @@
 '''
 Author: Nathan Frank
-Last Modified: 01/26/2016
+Last Modified: 02/04/2016
 
 Description: This module lays out a set of functions for running simulations
 of Gamma-Ray Burst Afterglows. In addition to some helper functions for saving
@@ -13,28 +13,32 @@ the fundamental physical properties and surface brightness profile of the burst.
 #! /usr/bin/python
 
 # import most of what we'll need.
-import os, sys
+import os
+import sys
 from scipy import optimize
 from scipy.integrate import quad  # , simps, romberg, quadrature
-from scipy.interpolate import interp1d
-from scipy.interpolate import InterpolatedUnivariateSpline
+from scipy.interpolate import interp1d, InterpolatedUnivariateSpline
 from math import cos, acos, sin, sqrt, degrees, radians, copysign, pi
 import numpy as np
 import numpy.ma as ma
-import time, datetime
 import multiprocessing as mp
 from ConfigParser import SafeConfigParser
 
 # non-Windows specific import statements for matplotlib.
 if 'win' not in sys.platform:
     print "Not running on windows."
-    import matplotlib
-    matplotlib.use('Agg')
+    import matplotlib as mpl
+    mpl.use('Agg')
 
 # import matplotlib and various associated packages.
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as c
 from matplotlib.colors import LogNorm
+import colormaps as cmaps
+plt.register_cmap(name='viridis', cmap=cmaps.viridis)
+plt.register_cmap(name='inferno', cmap=cmaps.inferno)
+plt.register_cmap(name='plasma', cmap=cmaps.plasma)
 
 # Define functions for saving arrays and matplotlib images.
 def saveArray(array, path, ext='npy', verbose = True):
@@ -383,96 +387,253 @@ def gaussPL(y, rPerp, thetaV, phi, sig, kap):
 
     return(np.exp2(-func))
 
-def coreJet(y, rPerp, thetaV, phi, sig):
+def coreJet(angle, sig, *args):
     '''
     Define the core jet profile, which is essentially a Heaviside function, i.e.
-        this only returns a value (1.0) if the angle thetaPrime is greater than sig.
+        this only returns a value (1.0) if the angle is greater than sig.
     
-    y [0-1]: The scaled variable in the radial direction. y := R/Rl.
+    angle: Either a numeric value for the angular measure being compared to sig
+        or a generating function for such an angle with optional arguments *args.
     
-    rPerp [0-1]: The perpendicular distance from the LOS in scaled units of Rl.
-        Through testing it should not generally be greater than 0.2.
+    sig: size of jet core. Anything at an angle < sig will return a value of 1.0,
+        i.e. will be within the coreJet profile and anything with angle > sig will
+        return a value of 0.0.
     
-    thetaV [0-~pi/4]: The viewing angle, in radians, between the LOS to observer
-        and the jet emission axis.
-    
-    phi [0-pi]: Interior angle of spherical triangle. phi = 0 corresponds to the
-        direction toward the main axis from the LOS.
-    
-    sig : The angular scale (width) of the profile. This value defines the FWHM.
+    *args: optional arguments if angle is a generating function. If they exist
+        the angle will be defined by calling angle(*args).
 
-    
+    example:
     '''
-    thP = thetaPrime(y, rPerp, thetaV, phi)
+    if args:
+        thP = angle(*args)
+    else:
+        thP = angle
+
     if thP > sig:
         val = 0.0
     else:
         val = 1.0
     return(val)
+
+def gammaA(gamma0, k, t0, t):
+    '''
+    Define the Lorentz factor on the main axis at some time (t) relative to 
+    an initial value at some reference time (t0).
     
+    gamma0: Lorentz factor at the reference time t0.
+    
+    k: power-law index on the external density profile.
+        Examples: k=0 (ISM) or k=2 (Stellar Wind)
+    
+    t0: reference time defining gamma0.
+    
+    t: current time (time of interest to calculate gammaA).
+    
+    '''
+    return gamma0*np.power((t/t0), -(3.0 - k)/(2.0*(4.0 - k)))
+
+def gammaL(gammaA, k, y, eFunc, *args):
+    '''
+    Define the Lorentz factor away from the main axis.
+    
+    gammaA: The Lorentz factor on the main axis.
+    
+    k: power-law index on the external density profile.
+        Examples: k=0 (ISM) or k=2 (Stellar Wind)
+    
+    y [0-1]: The scaled variable in the radial direction. y := R/Rl.
+    
+    eFunc: energy function being used. This will be called as eFunc(*args).
+    
+    *args: (optional...not really) Arguments to eFunc.
+    '''
+    tiny = np.power(10.0, -7)
+    if y <= tiny:
+        y = tiny
+    return(gammaA*np.power(eFunc(*args), 0.5)*np.power(y, 0.5*(k - 3.0)))
+
+def ex(eFunc, k, rP, gA, *args):
+    '''
+    Define the scaled parameter perpendicular to the LOS.
+    
+    eFunc: energy function being used. This will be called as eFunc(*args).
+    
+    k: power-law index on the external density profile.
+        Examples: k=0 (ISM) or k=2 (Stellar Wind)
+    
+    rP: [0-1]: The perpendicular distance from the LOS in scaled units of Rl.
+        Through testing it should not generally be greater than 0.2.
+    
+    gA : Lorentz factor on the main axis.
+    
+    *args: (optional...not really) Arguments to eFunc.
+    
+    example:
+    '''
+
+    energyTerm = np.power(eFunc(*args), 0.5)
+    kTerm = np.power(5.0 - k, np.divide(5.0 - k, 2.0*(4.0 - k)))
+    rTerm =  np.multiply(gA, rP)
+    return(np.multiply(np.multiply(kTerm, energyTerm), rTerm))
+
+def chi(y, exFunc, *args):
+    '''
+    Define the similarity variable chi = f(x, y, k).
+    
+    y [0-1]: The scaled variable in the radial direction. y := R/Rl. 
+    
+    *args: (optional...not really) Arguments to exFunc.
+    
+    example:
+    '''
+    if args:
+        chx = exFunc(*args)
+    else:
+        chx = exFunc
+    
+    Ck = (4.0 - k)*np.power(5.0 - k, -(5.0 - k)/(4.0 - k))
+    if chx <= 1.0 and chx >= 0.0:
+        return((y - Ck*np.power(chx, 2.0))/np.power(y, 5.0 - k))
+    else:
+        # return(np.power(10.0, -7.0))
+        return(0.0)
+
 if __name__ == '__main__':
     import sys
     view = sys.argv[1]
     
     # Define some constants.
-    k = 0.0
+    k = 2.0
     p = 2.2
     t0 = 1.0
     gamma0 = 50.0
-    thetaV = radians(6.0)
-    sig = radians(6.0)
-    kap = 3.0
-    dist = 0.2
+    thetaV = radians(0.0)
+    sig = radians(2.0)
+    kap = 0.0
+    dist = 0.15
     offset = 0.01
-    n_grid = 100
+    n_grid = 500
     tolVal = 1.0e-9
+    time = 1.0
     
-    if view == 'front':
-        xg = np.linspace(offset - dist, offset + dist, n_grid)
-        yg = np.linspace(-dist, dist, n_grid)
-        
-        X, Y = np.meshgrid(xg, yg)
-        array = np.zeros((n_grid, n_grid))
-        
-        for i in range(len(X)):
-            for j in range(len(X[i])):
-                phi = angle(offset, 0.0, offset - X[i][j], Y[i][j])
-                rPerp = np.sqrt(np.power(X[i][j] - offset,2.0) + np.power(Y[i][j], 2.0))
+    plt.figure(dpi=300)
+    fig, axarr = plt.subplots(3, 3, sharex=True, sharey=True)
+    # axarr[0,0].invert_yaxis()
+    kappas = [1.0, 3.0, 10.0]
+    thetas = [0.0, 1.0, 3.0]
+    times = [1.0, 10.0, 100.0]
+    ks = [0.0, 2.0]
+    
+    for a, kap in enumerate(kappas):
+        for b, thV in enumerate(thetas):
+    # for a, time in enumerate(times):
+        # for b, k in enumerate(ks):
+            thetaV = thV*sig
+            if view == 'front':
+                xg = np.linspace(offset - dist, offset + dist, n_grid)
+                yg = np.linspace(-dist, dist, n_grid)
                 
-                array[i][j] = coreJet(1.0, rPerp, thetaV, phi, sig)
+                X, Y = np.meshgrid(xg, yg)
+                array = np.zeros((n_grid, n_grid))
+                
+                for i in range(len(X)):
+                    for j in range(len(X[i])):
+                        phi = angle(offset, 0.0, offset - X[i][j], Y[i][j])
+                        rPerp = np.sqrt(np.power(X[i][j] - offset,2.0) + np.power(Y[i][j], 2.0))
+                        
+                        # array[i][j] = gaussPL(y, rPerp, thetaV, phi, sig, kap)
+                        gamA = gammaA(gamma0, k, t0, time)
+                        # array[i][j] = gammaL(gamA, k, y, gaussPL, y, rPerp,
+                                            # thetaV, phi, sig, kap)
+                        array[i][j] = ex(gaussPL, k, rPerp, gamA, 1.0, rPerp, thetaV, phi, sig, kap)
+                        # array[i][j] = chi(1.0, ex, gaussPL, k, rPerp, gamA, 1.0, rPerp, thetaV, phi, sig, kap)
 
-        
-    elif view == 'top':
-        xg = np.linspace(-dist, dist, n_grid)
-        yg = np.linspace(0.0, 1.0, n_grid)
-        
-        X, Y = np.meshgrid(xg, yg)
-        array = np.zeros((n_grid, n_grid))
-        
-        for i in range(len(X)):
-            for j in range(len(X[i])):
-                y = Y[i][j]
-                if X[i][j] > 0.0:
-                    phi = radians(180.0)
-                    rPerp = X[i][j]
-                else:
-                    phi = radians(0.0)
-                    rPerp = -X[i][j]
                 
-                array[i][j] = thetaPrime(y, rPerp, thetaV, phi)
-    
-    else:
-        print "Invalid view chosen. Try again."
-    
-    array = ma.masked_invalid(array)
-    
-    plt.figure()
-    plt.pcolormesh(X, Y, array, cmap = plt.cm.jet)
-    plt.colorbar()
-    plt.axis([min(xg), max(xg), min(yg), max(yg)])
-    if view == 'top':
-        plt.gca().invert_yaxis()
-    plt.plot([min(xg),max(xg)],[0.0,0.0],color = 'black',linestyle = 'dashed')
-    plt.plot([0.0,0.0],[min(yg),max(yg)],color = 'black',linestyle = 'dashed')
-    plt.scatter(offset,0.0,color = 'black')
-    plt.show()
+            elif view == 'top':
+                xg = np.linspace(-dist, dist, n_grid)
+                yg = np.linspace(0.0, 1.0, n_grid)
+                
+                X, Y = np.meshgrid(xg, yg)
+                array = np.zeros((n_grid, n_grid))
+                
+                for i in range(len(X)):
+                    for j in range(len(X[i])):
+                        y = Y[i][j]
+                        if X[i][j] > 0.0:
+                            phi = radians(180.0)
+                            rPerp = X[i][j]
+                        else:
+                            phi = radians(0.0)
+                            rPerp = -X[i][j]
+                        
+                        # array[i][j] = gaussPL(y, rPerp, thetaV, phi, sig, kap)
+                        gamA = gammaA(gamma0, k, t0, time)
+                        # array[i][j] = gammaL(gamA, k, y, gaussPL, y, rPerp,
+                                            # thetaV, phi, sig, kap)
+                        exVal = ex(gaussPL, k, rPerp, gamA, y, rPerp, thetaV, phi, sig, kap)
+                        array[i][j] = chi(y, exVal)
+            
+            else:
+                print "Invalid view chosen. Try again."
+            
+            array = ma.masked_invalid(array)
+            
+            # plt.figure(dpi=300)
+            # axarr[k, t].pcolormesh(X, Y, array, cmap = plt.get_cmap('plasma'), norm = c.LogNorm(vmin = 0.001))
+            im = axarr[a, b].imshow(array, cmap = plt.get_cmap('plasma'),
+                                                extent=[min(xg),
+                                                            max(xg),
+                                                            min(yg),
+                                                            max(yg)],
+                                                aspect="auto",
+                                                origin="lower",
+                                                norm = c.LogNorm(vmin = 1))
+            # plt.colorbar()
+            axarr[a, b].axis([min(xg), max(xg), min(yg), max(yg)])
+            if view == 'top':
+                axarr[a, b].invert_yaxis()
+            axarr[a, b].plot([min(xg),max(xg)],[0.0,0.0],color = 'black',
+                            linestyle = 'dashed')
+            axarr[a, b].plot([0.0,0.0],[min(yg),max(yg)],color = 'black',
+                        linestyle = 'dashed')
+            axarr[a, b].scatter(offset,0.0,color = 'black')
+            axarr[a, b].set_title(('$\Theta_v = {b:04.1f}^\circ$'
+                                    '| $\kappa = {c:2.1f}$')
+                                    .format(b=degrees(thetaV), c=kap),
+                                    fontsize=11)
+            axarr[a, b].set_xticklabels(['-0.1', '0.0', '0.1'],
+                                        rotation=45)
+
+            # plt.pcolormesh(X, Y, array, cmap = plt.get_cmap('plasma'),
+                            # norm = c.LogNorm(vmin = 1))
+            # plt.colorbar()
+            # plt.axis([min(xg), max(xg), min(yg), max(yg)])
+            # if view == 'top':
+                # plt.gca().invert_yaxis()
+            # plt.plot([min(xg),max(xg)],[0.0,0.0],color = 'black',linestyle = 'dashed')
+            # plt.plot([0.0,0.0],[min(yg),max(yg)],color = 'black',linestyle = 'dashed')
+            # plt.scatter(offset,0.0,color = 'black')
+            # plt.title(r'$t = {b:7.2f}$ mins., $\Gamma = {a:7.2f}$'.format(a = gamA, b = time))
+            # plt.suptitle(('Self-Similar Variable ($\chi$) \n '
+                        # '($\sigma = {a:04.1f}^\circ$, $k = {b:3.1f}$, '
+                        # '$t = {d:7.2f}$ s, $\Gamma_A = {e:7.2f}$)')
+                        # .format(a=degrees(sig), b=k, d=time, e=gamA))
+            # plt.xlabel('$R_\perp /R_l$')
+            # plt.ylabel('$y = R/R_l$')
+    plt.suptitle(('Self-Similar Variable ($\chi$) '
+                '($t = {c:7.2f}$ s, $\Gamma_A = {d:7.2f}$, '
+                '$k = {b:3.1f}$, $\sigma = {a:04.1f}^\circ$)')
+                .format(a=degrees(sig), b=k, c=time, d=gamA), fontsize=13)
+    cax,kw = mpl.colorbar.make_axes([ax for ax in axarr.flat],
+                                    orientation='vertical',
+                                    fraction=0.1, pad=0.05)
+    plt.colorbar(im, cax=cax, **kw)
+    plt.setp(axarr, xticks=[-0.1, 0.0, 0.1], xticklabels=['-0.1', '0.0', '0.1'])
+            # yticks = [-0.1, 0.0, 0.1], yticklabels = ['-0.1', '0.0', '0.1'])
+    fig.text(0.45, 0.03, '$R_\perp /R_l$', ha='center', va='center',
+            fontsize=15)
+    fig.text(0.05, 0.5, '$y = R/R_l$', ha='center', va='center',
+            rotation='vertical', fontsize=15)
+    save('./plots/grid/chi/top/t={a:07.2f}_k={b:3.1f}_sig={c:04.1f}_plasma'
+                .format(a=time, b=k, c=degrees(sig)), ext='pdf')
+    # plt.show()
